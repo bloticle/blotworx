@@ -237,7 +237,83 @@ pub fn poll() -> Pad {
         buttons, triggers: [trigger(lt), trigger(rt)] }
 }
 
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(target_os = "macos")]
+// Convert to XInput
+pub fn poll() -> Pad {
+    use gilrs::{Axis, Button};
+    use std::cell::RefCell;
+    thread_local! {
+        static GILRS: RefCell<Option<gilrs::Gilrs>> = const { RefCell::new(None) };
+        static FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    GILRS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            if FAILED.with(|failed| failed.get()) {
+                return Pad::default();
+            }
+            match gilrs::Gilrs::new() {
+                Ok(gilrs) => *slot = Some(gilrs),
+                Err(error) => {
+                    log::warn!("Gamepad support unavailable: {error}");
+                    FAILED.with(|failed| failed.set(true));
+                    return Pad::default();
+                }
+            }
+        }
+        let gilrs = slot.as_mut().unwrap();
+        while gilrs.next_event().is_some() {}
+        let Some((_, gamepad)) = gilrs.gamepads().find(|(_, gamepad)| gamepad.is_connected()) else {
+            return Pad::default();
+        };
+        let axis = |axis: Axis| (gamepad.value(axis).clamp(-1., 1.) * i16::MAX as f32) as i16;
+        let trigger = |axis: Axis, button: Button| {
+            let value = gamepad.value(axis).clamp(0., 1.);
+            if value > 0. {
+                (value * f32::from(u8::MAX)) as u8
+            } else if gamepad.is_pressed(button) {
+                u8::MAX
+            } else {
+                0
+            }
+        };
+        let mut buttons = 0u16;
+        for (button, bit) in [
+            (Button::DPadUp, 0x0001),
+            (Button::DPadDown, 0x0002),
+            (Button::DPadLeft, 0x0004),
+            (Button::DPadRight, 0x0008),
+            (Button::Start, 0x0010),
+            (Button::Select, 0x0020),
+            (Button::LeftThumb, 0x0040),
+            (Button::RightThumb, 0x0080),
+            (Button::LeftTrigger, 0x0100),
+            (Button::LeftTrigger2, 0x0100),
+            (Button::RightTrigger, 0x0200),
+            (Button::RightTrigger2, 0x0200),
+            (Button::Mode, 0x0400),
+            (Button::South, 0x1000),
+            (Button::East, 0x2000),
+            (Button::West, 0x4000),
+            (Button::North, 0x8000),
+        ] {
+            if gamepad.is_pressed(button) {
+                buttons |= bit;
+            }
+        }
+        Pad {
+            left: stick(axis(Axis::LeftStickX), axis(Axis::LeftStickY)),
+            right: stick(axis(Axis::RightStickX), axis(Axis::RightStickY)),
+            buttons,
+            triggers: [
+                trigger(Axis::LeftZ, Button::LeftTrigger),
+                trigger(Axis::RightZ, Button::RightTrigger),
+            ],
+        }
+    })
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 pub fn poll() -> Pad {
     Pad::default()
 }

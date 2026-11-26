@@ -8,7 +8,7 @@ Download the Windows demo and open **Blotworx.exe**. On first launch, supply you
 
 ## Build and run
 
-The current development target is 64-bit Windows. Install Rust and the Visual Studio C++ build tools. Cargo builds the bundled native dependencies. The default build includes the EM1 gameplay HUD renderer. It loads the HUD movie and textures from your game installation.
+The current development target is 64-bit Windows and macOS. Install Rust and the Visual Studio C++ build tools. Cargo builds the bundled native dependencies. The default build includes the EM1 gameplay HUD renderer. It loads the HUD movie and textures from your game installation.
 
 ```powershell
 cargo run --locked

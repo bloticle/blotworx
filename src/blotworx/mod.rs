@@ -599,6 +599,8 @@ mod movie;
 mod movie_skip;
 mod movie_tracks;
 mod movie_audio;
+#[cfg(target_os = "macos")]
+mod macos_audio;
 mod movie_codec;
 mod multi_position_audio;
 mod named_effects;
@@ -1655,10 +1657,10 @@ pub(crate) fn run_platform(
             "box3d_live_allocation_bytes": physics::box3d_allocated_bytes(),
             "process_working_set_bytes": process_memory.map(|(working, _)| working),
             "process_private_bytes": process_memory.map(|(_, private)| private),
-            "windows_process_heap_count": process_heaps.map(|(count, _, _, _)| count),
-            "windows_process_heaps_allocated_bytes": process_heaps.map(|(_, allocated, _, _)| allocated),
-            "windows_process_heaps_committed_bytes": process_heaps.map(|(_, _, committed, _)| committed),
-            "windows_process_heaps_reserved_bytes": process_heaps.map(|(_, _, _, reserved)| reserved),
+            "process_heap_container_count": process_heaps.as_ref().map(|heaps| heaps.containers),
+            "process_heap_allocated_bytes": process_heaps.as_ref().map(|heaps| heaps.allocated),
+            "process_heap_committed_bytes": process_heaps.as_ref().map(|heaps| heaps.committed),
+            "process_heap_reserved_bytes": process_heaps.as_ref().and_then(|heaps| heaps.reserved),
             "scope": "Loaded scene payload estimates and process snapshot; excludes renderer allocations in inspect mode"
         });
         report["player_ability_checkpoint_records"] = serde_json::json!({"records":world.player_ability_save_summary()?,
@@ -5501,7 +5503,7 @@ impl Engine {
                 let gl_asset_payload_bytes =
                     crate::render_support::viewport3d::cached_scene_asset_payload_bytes();
                 let rust_heap = crate::memory_profile::snapshot();
-                let windows_heaps = debug_view::process_heap_bytes();
+                let process_heaps = debug_view::process_heap_bytes();
                 let (actor_model_count, actor_model_bytes) =
                     world.authored_havok.cached_model_payload_summary();
                 let (skin_model_count, skin_bytes) = world.skins.iter().fold(
@@ -5608,10 +5610,10 @@ impl Engine {
                     "retained_dynamic_and_phantom_collision_source":{"shape_count":source_collision_shape_count,"owned_cpu_bytes":source_collision_bytes},
                     "startup_unused_texture_bytes_released":world.startup_texture_cache_pruned_bytes,
                     "script_runtime":world.scripts.memory_summary(),
-                    "windows_process_heap_count":windows_heaps.map(|(count, _, _, _)|count),
-                    "windows_process_heaps_allocated_bytes":windows_heaps.map(|(_, allocated, _, _)|allocated),
-                    "windows_process_heaps_committed_bytes":windows_heaps.map(|(_, _, committed, _)|committed),
-                    "windows_process_heaps_reserved_bytes":windows_heaps.map(|(_, _, _, reserved)|reserved),
+                    "process_heap_container_count":process_heaps.as_ref().map(|heaps|heaps.containers),
+                    "process_heap_allocated_bytes":process_heaps.as_ref().map(|heaps|heaps.allocated),
+                    "process_heap_committed_bytes":process_heaps.as_ref().map(|heaps|heaps.committed),
+                    "process_heap_reserved_bytes":process_heaps.as_ref().and_then(|heaps|heaps.reserved),
                     "process_working_set_bytes":working_bytes,
                     "process_private_bytes":private_bytes,
                     "excludes":"GPU allocations, allocator overhead and most runtime state"

@@ -6,6 +6,7 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let android = target_os == "android";
     let horizon = target_os == "horizon";
+    let windows = target_os == "windows";
     if android {
         println!("cargo:rustc-cdylib-link-arg=-Wl,-z,max-page-size=16384");
         cc::Build::new().cpp(true).std("c++17").opt_level(2)
@@ -17,8 +18,22 @@ fn main() {
         let mut shaders = cc::Build::new();
         if android {
             shaders.std("c99");
+        } else if windows {
+            shaders
+                .cpp(true)
+                .std("c++17")
+                .file("src/blotworx/d3d9_translate_bridge.cpp");
         } else {
-            shaders.cpp(true).std("c++17").file("src/blotworx/d3d9_translate_bridge.cpp");
+            // Compiling the C sources fails on clang
+            cc::Build::new()
+                .cpp(true)
+                .std("c++17")
+                .opt_level(2)
+                .define("MOJOSHADER_NO_VERSION_INCLUDE", None)
+                .include("third_party/mojoshader")
+                .file("src/blotworx/d3d9_translate_bridge.cpp")
+                .compile("blotworx_shader_bridge");
+            shaders.std("c99");
         }
         shaders
             .opt_level(2)

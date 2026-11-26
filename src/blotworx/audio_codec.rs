@@ -8,7 +8,65 @@ pub fn provision() -> Result<PathBuf> {
     anyhow::bail!("External audio codec binary is unsupported on Nintendo 3DS")
 }
 
-#[cfg(not(target_os = "horizon"))]
+// vgmstream publishes a macOS build, while the Windows version is in the runtime cache
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const PINNED: Option<super::movie_codec::Pinned> = Some(super::movie_codec::Pinned {
+    url: "https://github.com/vgmstream/vgmstream/releases/download/r2168/vgmstream-mac.zip",
+    archive_sha256: "91fb9da354211acf41c3ea5626c003df1562900be90cb84ad3db278165b43dcb",
+    member: "vgmstream-cli",
+    executable: "vgmstream-cli",
+    executable_sha256: "db0a5b4d72d939c72a41b9f21db1ddb7262b21843becfd069c2f2f13411dd0e1",
+});
+
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+const PINNED: Option<super::movie_codec::Pinned> = None;
+
+#[cfg(target_os = "macos")]
+pub fn provision() -> Result<PathBuf> {
+    // The release pins a Windows vgmstream build
+    static READY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(path) = READY.get() {
+        return Ok(path.clone());
+    }
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("BLOTWORX_VGMSTREAM") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("Codecs/vgmstream-cli"));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            candidates.push(directory.join("vgmstream-cli"));
+        }
+    }
+    candidates.extend(
+        [
+            "/opt/homebrew/bin/vgmstream-cli",
+            "/usr/local/bin/vgmstream-cli",
+            "/usr/bin/vgmstream-cli",
+        ]
+        .map(PathBuf::from),
+    );
+    for candidate in candidates {
+        if candidate.is_file() {
+            let _ = READY.set(candidate.clone());
+            return Ok(candidate);
+        }
+    }
+    if let Some(pinned) = &PINNED {
+        let path = super::movie_codec::install_pinned(pinned, "vgmstream-r2168", &format!("Pinned codec distribution: {}\nArchive SHA256: {}\nExecutable SHA256: {}\nSource and notices: https://github.com/vgmstream/vgmstream/tree/r2168\nThis worker decodes audio only.\n", pinned.url, pinned.archive_sha256, pinned.executable_sha256))?;
+        let _ = READY.set(path.clone());
+        return Ok(path);
+    }
+    anyhow::bail!(
+        "vgmstream-cli could not be provisioned on this platform. Install vgmstream-cli or set BLOTWORX_VGMSTREAM to the executable."
+    )
+}
+
+#[cfg(all(not(target_os = "horizon"), not(target_os = "macos")))]
 pub fn provision() -> Result<PathBuf> {
     static READY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());

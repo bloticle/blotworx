@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
         print!("{}", startup_log::report(None, None, None));
         return Ok(());
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if std::env::var_os(startup_log::GAME_PROCESS_ENV).is_none()
         && !first_arg.as_deref().is_some_and(|arg| {
             matches!(arg.to_str(), Some("diagnose" | "--apply-update" | "-h" | "--help"))

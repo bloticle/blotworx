@@ -110,8 +110,12 @@ impl Preferences {
         self.grades[self.index()]
     }
     fn path() -> std::path::PathBuf {
-        std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
+        // Use platform application-data directory for preferences
+        #[cfg(windows)]
+        let storage = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+        #[cfg(not(windows))]
+        let storage = dirs::data_local_dir();
+        storage
             .unwrap_or_else(std::env::temp_dir)
             .join("BlueThinner")
             .join("blotworx-options.json")

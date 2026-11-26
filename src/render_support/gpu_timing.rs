@@ -11,6 +11,7 @@ struct Slot {
 pub(super) struct Pool {
     slots: Vec<Slot>,
     error: Option<String>,
+    checked_support: bool,
 }
 pub(super) struct Interval<'g> {
     gl: &'g glow::Context,
@@ -25,9 +26,7 @@ impl Drop for Interval<'_> {
 impl Pool {
     pub unsafe fn poll(&mut self, gl: &glow::Context) {
         for slot in &mut self.slots {
-            if slot.owner.is_none()
-                || gl.get_query_parameter_u32(slot.query, glow::QUERY_RESULT_AVAILABLE) == 0
-            {
+            if slot.owner.is_none() {
                 continue;
             }
             // With a query buffer bound, GL interprets the output pointer as a
@@ -45,6 +44,19 @@ impl Pool {
             };
             if query_buffer {
                 gl.bind_buffer(glow::QUERY_BUFFER, None);
+            }
+            // Read availability through the entry point
+            let mut available = 0u64;
+            gl.get_query_parameter_u64_with_offset(
+                slot.query,
+                glow::QUERY_RESULT_AVAILABLE,
+                (&mut available as *mut u64) as usize,
+            );
+            if available == 0 {
+                if query_buffer {
+                    gl.bind_buffer(glow::QUERY_BUFFER, old);
+                }
+                continue;
             }
             let mut ns = 0u64;
             gl.get_query_parameter_u64_with_offset(
@@ -69,6 +81,16 @@ impl Pool {
         owner: Arc<Mutex<RenderWork>>,
     ) -> Option<Interval<'g>> {
         self.poll(gl);
+        if !self.checked_support {
+            self.checked_support = true;
+            let extensions = gl.supported_extensions();
+            if !(extensions.contains("GL_ARB_timer_query")
+                || extensions.contains("GL_EXT_timer_query")
+                || extensions.contains("GL_EXT_disjoint_timer_query"))
+            {
+                self.error = Some("GPU timer queries are unsupported by this driver".to_string());
+            }
+        }
         if self.slots.is_empty() && self.error.is_none() {
             // Four diagnostic samples in flight, independent of game work.
             for _ in 0..4 {
@@ -98,6 +120,7 @@ impl Pool {
             gl.delete_query(slot.query);
         }
         self.error = None;
+        self.checked_support = false;
     }
 }
 pub(super) unsafe fn validate(gl: &glow::Context) -> anyhow::Result<serde_json::Value> {

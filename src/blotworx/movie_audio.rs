@@ -1,5 +1,7 @@
 //! Streaming PCM output with bounded queued buffers and a device sample clock.
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
+#[cfg(windows)]
+use anyhow::Context;
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -236,14 +238,78 @@ mod windows {
 }
 #[cfg(windows)]
 pub use windows::Stream;
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::super::macos_audio;
+    use super::*;
+    use std::time::Duration;
+
+    pub struct Stream {
+        output: macos_audio::Output,
+        pub rate: u32,
+        pub channels: u16,
+        pub submitted: u64,
+        pub started: bool,
+    }
+    impl Stream {
+        pub fn open(rate: u32, channels: u16) -> Result<Self> {
+            ensure!(rate > 0 && channels > 0, "Invalid movie audio format");
+            let capacity = (rate as usize).saturating_mul(2);
+            let output = macos_audio::Output::open(rate, channels, capacity, false)?;
+            Ok(Self {
+                output,
+                rate,
+                channels,
+                submitted: 0,
+                started: false,
+            })
+        }
+        pub fn queue(&mut self, samples: Vec<i16>) -> Result<()> {
+            ensure!(
+                samples.len() % usize::from(self.channels) == 0,
+                "Movie audio chunk is not frame-aligned"
+            );
+            if samples.is_empty() {
+                return Ok(());
+            }
+            self.submitted = self.output.push(&samples, Duration::from_millis(100))?;
+            Ok(())
+        }
+        pub fn play(&mut self) -> Result<()> {
+            if !self.started {
+                self.output.start()?;
+                self.started = true;
+            }
+            Ok(())
+        }
+        pub fn poll(&mut self) -> Result<()> {
+            Ok(())
+        }
+        pub fn position(&self) -> Result<u64> {
+            Ok(if self.started {
+                self.output.position_frames()
+            } else {
+                0
+            })
+        }
+        pub fn empty(&self) -> bool {
+            self.output.consumed_frames() >= self.submitted
+        }
+        pub fn queued_frames(&self) -> Result<u64> {
+            Ok(self.submitted.saturating_sub(self.position()?))
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+pub use macos::Stream;
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 pub struct Stream {
     pub rate: u32,
     pub channels: u16,
     pub submitted: u64,
     pub started: bool,
 }
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 impl Stream {
     pub fn open(_: u32, _: u16) -> Result<Self> {
         anyhow::bail!("Movie audio output is not implemented on this platform")

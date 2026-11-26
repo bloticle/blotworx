@@ -14,7 +14,7 @@ struct MemorySample {
     gl_asset_payload_bytes: usize,
     gl_opaque_texture_savings_bytes: usize,
     rust_heap: Option<(usize, usize)>,
-    windows_heaps: Option<(usize, usize, usize, usize)>,
+    heaps: Option<ProcessHeaps>,
     process: Option<(usize, usize)>,
     scripts: super::actor_scripts::MemorySummary,
 }
@@ -264,6 +264,28 @@ pub(super) fn runtime_entity_heap_bytes(world: &World) -> (usize, usize, usize) 
     (identity, components, properties)
 }
 
+/// Allocator-container totals for this process
+pub(super) struct ProcessHeaps {
+    /// Containers whose counters were readable (Windows heaps or macOS malloc zones)
+    pub(super) containers: usize,
+    /// Bytes allocated from those containers
+    pub(super) allocated: usize,
+    /// Bytes of backing virtual memory the containers hold
+    pub(super) committed: usize,
+    /// Bytes reserved. I believe this is Windows only
+    pub(super) reserved: Option<usize>,
+    /// Platform name for the containers
+    pub(super) label: &'static str,
+}
+
+/// Names for the overlay counters
+#[cfg(windows)]
+pub(super) const PROCESS_MEMORY_LABELS: (&str, &str) = ("working set", "private");
+#[cfg(target_os = "macos")]
+pub(super) const PROCESS_MEMORY_LABELS: (&str, &str) = ("resident", "footprint");
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(super) const PROCESS_MEMORY_LABELS: (&str, &str) = ("working set", "private");
+
 /// Return (working set, private bytes) for this process when the host exposes
 /// process counters. The asset-payload estimate below remains useful on other
 /// platforms and is intentionally reported separately.
@@ -303,7 +325,13 @@ pub(super) fn process_memory_bytes() -> Option<(usize, usize)> {
         };
         return Some((value_kib("VmRSS:")?, value_kib("VmData:")?));
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // Mach shows the phys_footprint ledger
+        let (resident, footprint) = macos::task_memory()?;
+        return Some((resident, footprint));
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -311,8 +339,9 @@ pub(super) fn process_memory_bytes() -> Option<(usize, usize)> {
 
 /// Summarize process heaps when HeapSummary exists on this OS. Resolve
 /// dynamically because HeapSummary is only available on recent Windows
-/// releases; older systems simply omit this diagnostic.
-pub(super) fn process_heap_bytes() -> Option<(usize, usize, usize, usize)> {
+/// releases; older systems simply omit this diagnostic. The figures aren't
+/// really compatible with each other
+pub(super) fn process_heap_bytes() -> Option<ProcessHeaps> {
     #[cfg(windows)]
     {
         use std::mem::transmute;
@@ -356,11 +385,184 @@ pub(super) fn process_heap_bytes() -> Option<(usize, usize, usize, usize)> {
                 totals.3 = totals.3.saturating_add(summary.cbReserved);
             }
         }
-        (totals.0 > 0).then_some(totals)
+        (totals.0 > 0).then_some(ProcessHeaps {
+            containers: totals.0,
+            allocated: totals.1,
+            committed: totals.2,
+            reserved: Some(totals.3),
+            label: "Windows heaps",
+        })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let (containers, allocated, committed) = macos::malloc_zone_totals()?;
+        return Some(ProcessHeaps {
+            containers,
+            allocated,
+            committed,
+            reserved: None,
+            label: "Malloc zones",
+        });
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
+    }
+}
+
+/// Mach and malloc-zone counters
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::ffi::{c_int, c_void};
+
+    type KernReturn = c_int;
+    type MachPort = u32;
+
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    const TASK_VM_INFO: u32 = 22;
+
+    #[repr(C)]
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct TimeValue {
+        seconds: i32,
+        microseconds: i32,
+    }
+
+    /// `mach_task_basic_info_data_t`: 48 bytes
+    #[repr(C)]
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: TimeValue,
+        system_time: TimeValue,
+        policy: i32,
+        suspend_count: i32,
+    }
+
+    const _: () = assert!(std::mem::size_of::<MachTaskBasicInfo>() == 48);
+
+    /// The kernel rejects a buffer shorter than what its revised by, so pad it
+    #[repr(C)]
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+        // Nested so the padding can derive Default
+        trailing: [[u64; 8]; 14],
+    }
+
+    const _: () = assert!(std::mem::size_of::<TaskVmInfo>() >= 1024);
+
+    /// `malloc_statistics_t`.
+    #[repr(C)]
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct MallocStatistics {
+        blocks_in_use: u32,
+        size_in_use: usize,
+        max_size_in_use: usize,
+        size_allocated: usize,
+    }
+
+    const _: () = assert!(std::mem::size_of::<MallocStatistics>() == 32);
+
+    unsafe extern "C" {
+        /// `mach_task_self()` is a macro over libSystem global
+        static mach_task_self_: MachPort;
+        fn task_info(
+            target_task: MachPort,
+            flavor: u32,
+            task_info_out: *mut c_int,
+            task_info_out_count: *mut u32,
+        ) -> KernReturn;
+        fn malloc_get_all_zones(
+            task: MachPort,
+            reader: Option<unsafe extern "C" fn(MachPort, usize, usize, *mut *mut c_void) -> KernReturn>,
+            addresses: *mut *mut usize,
+            count: *mut u32,
+        ) -> KernReturn;
+        fn malloc_zone_statistics(zone: *const c_void, stats: *mut MallocStatistics);
+    }
+
+    /// `(resident set, phys_footprint)`
+    pub(super) fn task_memory() -> Option<(usize, usize)> {
+        let task = unsafe { mach_task_self_ };
+        let mut basic = MachTaskBasicInfo::default();
+        let mut count =
+            (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<u32>()) as u32;
+        let status = unsafe {
+            task_info(
+                task,
+                MACH_TASK_BASIC_INFO,
+                std::ptr::from_mut(&mut basic).cast::<c_int>(),
+                &mut count,
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        let mut vm = TaskVmInfo::default();
+        let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<u32>()) as u32;
+        let status = unsafe {
+            task_info(
+                task,
+                TASK_VM_INFO,
+                std::ptr::from_mut(&mut vm).cast::<c_int>(),
+                &mut count,
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        Some((basic.resident_size as usize, vm.phys_footprint as usize))
+    }
+
+    pub(super) fn malloc_zone_totals() -> Option<(usize, usize, usize)> {
+        let task = unsafe { mach_task_self_ };
+        let mut addresses: *mut usize = std::ptr::null_mut();
+        let mut count = 0u32;
+        let status = unsafe { malloc_get_all_zones(task, None, &mut addresses, &mut count) };
+        if status != 0 || addresses.is_null() || count == 0 {
+            return None;
+        }
+        let zones = unsafe { std::slice::from_raw_parts(addresses, count as usize) };
+        let mut containers = 0usize;
+        let mut allocated = 0usize;
+        let mut committed = 0usize;
+        for &zone in zones {
+            if zone == 0 {
+                continue;
+            }
+            let mut stats = MallocStatistics::default();
+            unsafe { malloc_zone_statistics(zone as *const c_void, &mut stats) };
+            containers += 1;
+            allocated = allocated.saturating_add(stats.size_in_use);
+            committed = committed.saturating_add(stats.size_allocated);
+        }
+        (containers > 0).then_some((containers, allocated, committed))
     }
 }
 
@@ -642,7 +844,7 @@ impl DebugView {
                         gl_opaque_texture_savings_bytes:
                             crate::render_support::viewport3d::cached_opaque_texture_savings_bytes(),
                         rust_heap: crate::memory_profile::snapshot(),
-                        windows_heaps: process_heap_bytes(),
+                        heaps: process_heap_bytes(),
                         process: process_memory_bytes(),
                         scripts: w.scripts.memory_summary(),
                     });
@@ -660,15 +862,19 @@ impl DebugView {
                         ui.monospace(format!("Rust heap requested bytes: {:.1} MiB live · {:.1} MiB peak (profiling build)", live as f64 / 1_048_576., peak as f64 / 1_048_576.));
                     }
                     ui.monospace(format!("Lua VM {:.1} MiB · imported scripts {:.1} MiB across {} files · {} loaded scripts · {} pending tasks (task slots {:.2} MiB)", memory.scripts.lua_heap_bytes as f64 / 1_048_576., memory.scripts.imported_source_payload_bytes as f64 / 1_048_576., memory.scripts.imported_source_count, memory.scripts.loaded_script_count, memory.scripts.pending_task_count, memory.scripts.pending_task_record_capacity_bytes as f64 / 1_048_576.));
-                    if let Some((count, allocated, committed, reserved)) = memory.windows_heaps {
-                        ui.monospace(format!("Windows heaps ({count}): {:.1} MiB allocated · {:.1} MiB committed · {:.1} MiB reserved", allocated as f64 / 1_048_576., committed as f64 / 1_048_576., reserved as f64 / 1_048_576.));
+                    if let Some(heaps) = &memory.heaps {
+                        let mut line = format!("{} ({}): {:.1} MiB allocated · {:.1} MiB committed", heaps.label, heaps.containers, heaps.allocated as f64 / 1_048_576., heaps.committed as f64 / 1_048_576.);
+                        if let Some(reserved) = heaps.reserved {
+                            line.push_str(&format!(" · {:.1} MiB reserved", reserved as f64 / 1_048_576.));
+                        }
+                        ui.monospace(line);
                     }
                     ui.monospace(format!("Inactive scenes retain ~{:.1} MiB of unique render + authored collision source data\nExcludes shared assets still referenced by active scenes and GPU allocations", memory.inactive_scenes as f64 / 1_048_576.));
                     ui.monospace(format!("Lossless cold-stored inactive-scene mesh + texture data: {:.1} MiB", memory.compressed_scene_assets as f64 / 1_048_576.));
                     let (entity_heap, component_heap, property_heap) = runtime_entity_heap_bytes(w);
                     ui.monospace(format!("Runtime heap estimate: {:.1} MiB entity records/identity · {:.1} MiB component storage · {:.1} MiB property trees\nCapacity-based payload estimate; excludes allocator/hash-table overhead and subsystem state", entity_heap as f64 / 1_048_576., component_heap as f64 / 1_048_576., property_heap as f64 / 1_048_576.));
                     if let Some((working, private)) = memory.process {
-                        ui.monospace(format!("Process memory: {:.1} MiB working set · {:.1} MiB private", working as f64 / 1_048_576., private as f64 / 1_048_576.));
+                        ui.monospace(format!("Process memory: {:.1} MiB {} · {:.1} MiB {}", working as f64 / 1_048_576., PROCESS_MEMORY_LABELS.0, private as f64 / 1_048_576., PROCESS_MEMORY_LABELS.1));
                     }
                 });
                 ui.collapsing(format!("Coverage / warnings ({})", w.report.warnings.len() + w.report.unsupported.len()), |ui| {

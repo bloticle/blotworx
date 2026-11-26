@@ -674,7 +674,38 @@ pub(super) mod endpoint {
 #[path = "audio_output_android.rs"]
 pub(super) mod endpoint;
 
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(target_os = "macos")]
+pub(super) mod endpoint {
+    use super::*;
+    use super::super::macos_audio;
+
+    pub struct Endpoint {
+        output: macos_audio::Output,
+    }
+    impl Endpoint {
+        pub fn open() -> Result<Self> {
+            let capacity = FRAMES * (QUEUED_BLOCKS + 4);
+            let output = macos_audio::Output::open(RATE, 2, capacity, true)?;
+            Ok(Self { output })
+        }
+        pub fn submit(&self, samples: Vec<i16>) -> Result<Buffer> {
+            let handle = self.output.handle();
+            let end = handle.push(&samples, Duration::from_millis(100))?;
+            Ok(Buffer { handle, end })
+        }
+    }
+    pub struct Buffer {
+        handle: macos_audio::Handle,
+        end: u64,
+    }
+    impl Buffer {
+        pub fn done(&self) -> bool {
+            self.handle.done(self.end)
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 pub(super) mod endpoint {
     use super::*;
     pub struct Endpoint;

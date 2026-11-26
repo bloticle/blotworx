@@ -152,7 +152,7 @@ pub fn save_report(report: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub const GAME_PROCESS_ENV: &str = "BLOTWORX_CRASH_MONITOR_CHILD";
 
 #[cfg(windows)]
@@ -181,6 +181,28 @@ pub fn supervise() -> anyhow::Result<()> {
                 .set_level(rfd::MessageLevel::Error)
                 .show();
         }
+    }
+    anyhow::bail!(error)
+}
+
+/// Store the report dialog
+#[cfg(target_os = "macos")]
+pub fn supervise() -> anyhow::Result<()> {
+    let result = std::process::Command::new(std::env::current_exe()?)
+        .args(std::env::args_os().skip(1))
+        .env(GAME_PROCESS_ENV, "1")
+        .status();
+    let error = match result {
+        Ok(status) if status.success() => return Ok(()),
+        Ok(status) => format!("Game process exited with {status}"),
+        Err(error) => format!("Could not start the game process: {error}"),
+    };
+    let diagnostics = report(None, Some(&error), None);
+    match directory().map(|directory| directory.join("blotworx-crash.txt")) {
+        Some(path) if fs::write(&path, &diagnostics).is_ok() => {
+            eprintln!("{error}\nDiagnostic report has been written to {}", path.display());
+        }
+        _ => eprintln!("{diagnostics}"),
     }
     anyhow::bail!(error)
 }
